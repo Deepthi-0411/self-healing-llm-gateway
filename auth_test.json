@@ -1,0 +1,14 @@
+﻿{
+  "model": "auto",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Authentication security test."
+    }
+  ],
+  "metadata": {
+    "tenant": "learning-platform",
+    "feature": "auth-missing-test",
+    "request_id": "auth-missing-001"
+  }
+}
