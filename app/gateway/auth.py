@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 
@@ -63,7 +64,10 @@ def authenticate_request(
     api_keys = _load_api_keys()
 
     for tenant, configured_key in api_keys.items():
-        if api_key == configured_key:
+        if hmac.compare_digest(
+            api_key,
+            configured_key,
+        ):
             return tenant
 
     raise HTTPException(

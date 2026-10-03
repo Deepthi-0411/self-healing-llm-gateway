@@ -65,6 +65,10 @@ from app.observability.metrics import (
 
 load_dotenv()
 
+APP_ENV = os.getenv(
+    "APP_ENV",
+    "development",
+).lower()
 
 # ============================================================
 # REQUEST MODELS
@@ -197,6 +201,19 @@ async def lifespan(app: FastAPI):
         == "true"
     )
 
+    if APP_ENV == "production" and any(
+        [
+            force_gemini_failure,
+            force_rate_limit_failure,
+            force_cloudflare_failure,
+            force_semantic_lookup_failure,
+            force_semantic_store_failure,
+        ]
+    ):
+        raise RuntimeError(
+            "Failure injection must be disabled in production."
+        )
+
     # ========================================================
     # REDIS
     # ========================================================
@@ -308,7 +325,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 # ============================================================
 # PROMETHEUS HTTP METRICS
 # ============================================================
@@ -352,7 +368,6 @@ async def prometheus_http_metrics(
             latency
         )
 
-
 # ============================================================
 # ROOT
 # ============================================================
@@ -375,7 +390,6 @@ async def root():
         "response_cache": "enabled",
         "semantic_cache": "enabled",
     }
-
 
 # ============================================================
 # HEALTH
@@ -406,7 +420,6 @@ async def health():
         },
     )
 
-
 # ============================================================
 # PROMETHEUS METRICS
 # ============================================================
@@ -419,7 +432,6 @@ async def metrics():
         media_type=CONTENT_TYPE_LATEST,
     )
 
-
 # ============================================================
 # FAILURE INJECTION
 # ============================================================
@@ -430,6 +442,11 @@ async def metrics():
 async def failure_injection(
     request: FailureInjectionRequest,
 ):
+    if APP_ENV == "production":
+        raise HTTPException(
+            status_code=404,
+            detail="Not found.",
+        )
 
     os.environ[
         "FORCE_GEMINI_FAILURE"
@@ -464,7 +481,6 @@ async def failure_injection(
             request.probe_delay_seconds
         ),
     }
-
 
 # ============================================================
 # CHAT COMPLETIONS
@@ -1050,14 +1066,7 @@ async def chat_completions(
         raise HTTPException(
             status_code=502,
             detail={
-                "error": (
-                    "All LLM providers failed"
-                ),
-                "exception_type": (
-                    error_type
-                ),
-                "request_id": (
-                    request.metadata.request_id
-                ),
+                "error": "All LLM providers failed",
+                "request_id": request.metadata.request_id,
             },
         ) from exc

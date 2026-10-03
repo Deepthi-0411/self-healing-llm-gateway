@@ -1,5 +1,26 @@
 services:
-
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: production
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
+      COHERE_API_KEY: ${COHERE_API_KEY}
+      REDIS_URL: redis://redis:6379
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS}
+      SEMANTIC_CACHE_MAX_DISTANCE: ${SEMANTIC_CACHE_MAX_DISTANCE}
+      SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED}
+      GATEWAY_API_KEYS_JSON: ${GATEWAY_API_KEYS_JSON}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
   redis:
     image: redis/redis-stack-server:latest
     container_name: llm-gateway-redis
