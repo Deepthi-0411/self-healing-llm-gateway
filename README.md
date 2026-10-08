@@ -1,721 +1,370 @@
-\# 🛡️ Self-Healing LLM Gateway
+# Self-Healing LLM Gateway
 
+A production-minded LLM gateway designed to provide a reliable infrastructure layer between applications and multiple LLM providers.
 
+The gateway provides a single OpenAI-compatible API while handling provider routing, caching, tenant controls, failure recovery, and operational observability.
 
-> \*\*An infrastructure layer that keeps LLM applications running when individual providers fail.\*\*
+The main goal of the project is to make LLM applications more resilient without requiring each application to implement its own provider-specific reliability and governance logic.
 
+---
 
+## Why This Project?
 
-Modern GenAI applications often depend on a single model provider.
+LLM applications depend on external model providers, which can introduce several operational problems:
 
-But providers can experience rate limits, temporary outages, latency spikes, or service failures.
+- Temporary provider failures
+- Rate limits
+- Increased latency
+- Repeated requests for similar prompts
+- Uncontrolled tenant usage
+- Provider-specific API differences
+- Difficulty identifying where failures occur
 
+Instead of handling these concerns independently inside every application, this project places them inside a centralized gateway.
 
+The application communicates with one gateway API, while the gateway manages the underlying LLM infrastructure.
 
-This project builds a \*\*self-healing LLM gateway\*\* that sits between an application and multiple LLM providers — handling routing, caching, usage controls, failure detection, automatic failover, and observability.
+---
 
+## Key Capabilities
 
+### OpenAI-Compatible Gateway
 
-\---
+The gateway exposes:
 
+`POST /v1/chat/completions`
 
+using an OpenAI-compatible request structure, making it easier for applications and clients to integrate without implementing provider-specific request formats.
 
-\## 🚨 The Problem
+### Multi-Provider LLM Support
 
+The gateway currently supports:
 
+- Google Gemini
+- Cloudflare Workers AI
+- Cohere
 
-A typical LLM application looks like this:
+LiteLLM is used to normalize communication with the configured providers.
 
+### Intelligent Request Routing
 
+Requests can be routed according to the configured model and model-tiering logic.
 
-```text
+This allows simpler requests to use appropriate models while keeping the routing logic centralized inside the gateway.
 
-Application
+### Exact Response Caching
 
-&#x20;    │
+Identical requests can be served from Redis instead of making another LLM provider request.
 
-&#x20;    ▼
+This reduces unnecessary provider calls and can improve response latency.
 
-&#x20; LLM API
+### Semantic Caching
 
-&#x20;    │
+The gateway also supports semantic cache lookup.
 
-&#x20;    ✕ Provider failure
+Requests that are sufficiently similar to a previously processed request can reuse an existing response instead of generating another provider request.
 
-&#x20;    │
+Embeddings are used to determine semantic similarity.
 
-&#x20;    ▼
+### Tenant-Aware Rate Limiting
 
-Application failure
+Redis-backed rate limiting controls request volume for individual tenants.
 
+This prevents a single tenant or application feature from continuously consuming gateway resources.
 
+### Tenant Budgets
 
-A provider failure should not necessarily become an application failure.
+The gateway tracks usage against configured tenant budgets.
 
+Requests can be rejected when a tenant reaches its configured usage limit.
 
+### Provider Circuit Breakers
 
-This gateway changes the architecture:
+Provider-specific circuit breakers prevent repeated requests from being sent to an unhealthy provider.
 
+The circuit breaker state is stored in Redis so provider health information can be shared across gateway instances.
 
+### Failure-Only Provider Failover
 
-&#x20;                        ┌───────────────┐
+The gateway does not switch providers unnecessarily.
 
-&#x20;                        │  Application  │
+When a provider request fails and recovery logic determines that the failure requires another provider, the gateway can continue through the configured provider chain.
 
-&#x20;                        └───────┬───────┘
+This allows an application request to succeed even when an individual provider is unavailable.
 
-&#x20;                                │
+### Retry and Recovery
 
-&#x20;                                ▼
+Transient provider failures can be handled through retry and recovery logic before moving to another provider.
 
-&#x20;                   ┌────────────────────────┐
+The system also records retry and provider recovery activity through Prometheus metrics.
 
-&#x20;                   │   Self-Healing Gateway │
+### Secure Authentication
 
-&#x20;                   │                        │
+The gateway uses tenant-aware Bearer authentication.
 
-&#x20;                   │  Routing                │
+Gateway API keys are:
 
-&#x20;                   │  Rate Limits           │
+- Loaded from environment configuration
+- Associated with tenants
+- Compared using constant-time comparison
+- Never intended to be stored in source control
 
-&#x20;                   │  Budgets               │
+Invalid credentials are rejected before the request reaches the LLM provider layer.
 
-&#x20;                   │  Exact Cache            │
+### PII Redaction
 
-&#x20;                   │  Semantic Cache         │
+Application logging includes recursive redaction for sensitive information such as:
 
-&#x20;                   │  Circuit Breakers       │
+- API keys
+- Authorization headers
+- Tokens
+- Passwords
+- Email addresses
+- IP addresses
+- Phone numbers
+- Credit-card-like values
 
-&#x20;                   │  Retry / Failover       │
+The goal is to keep operational logs useful without unnecessarily exposing sensitive information.
 
-&#x20;                   │  PII Redaction          │
+---
 
-&#x20;                   └───────────┬────────────┘
+## Request Processing
 
-&#x20;                               │
+A request passes through several gateway controls before reaching an LLM provider.
 
-&#x20;                ┌──────────────┼──────────────┐
+The gateway first authenticates the request and validates the tenant.
 
-&#x20;                ▼              ▼              ▼
+Rate limits and budget controls are then applied.
 
-&#x20;            Gemini       Cloudflare        Cohere
+The gateway determines the appropriate model/provider and checks the exact response cache followed by the semantic cache when enabled.
 
-&#x20;                               │
+If a cached response is unavailable, the request is sent to the provider.
 
-&#x20;                               ▼
+A successful provider response can be stored in the caches and returned to the application.
 
-&#x20;                        Prometheus
+If the provider fails, the gateway applies its retry, circuit-breaker, and failover logic before attempting another healthy provider when appropriate.
 
-&#x20;                               │
+This keeps reliability logic inside the infrastructure layer rather than inside every application using the gateway.
 
-&#x20;                               ▼
+---
 
-&#x20;                            Grafana
+## Self-Healing Validation
 
-🔄 How the Gateway Heals Itself
+The recovery mechanism was validated using a separate development gateway instance with controlled Gemini failure injection.
 
+A request targeting Gemini was intentionally made to fail.
 
+The gateway detected the provider failure and successfully continued through the provider fallback path.
 
-The important part of this project is not simply calling multiple APIs.
+The final request returned:
 
+- HTTP `200`
+- A successful Cloudflare provider response
+- The Cloudflare model `@cf/meta/llama-3.1-8b-instruct-fp8`
 
+The same recovery event was visible through the Grafana dashboard using metrics for:
 
-It is what happens when something goes wrong.
+- Gemini failures
+- Provider failures
+- Provider failovers
+- Cloudflare fallback success
+- Successful gateway requests
+- Gateway latency
+- Provider latency
 
+This validated both the recovery mechanism and the observability layer.
 
+Failure injection is restricted to development environments and is explicitly blocked in production.
 
-Application
+---
 
-&#x20;    │
+## Observability
 
-&#x20;    ▼
+Prometheus collects gateway and provider metrics, while Grafana provides the operational dashboard.
 
-&#x20;Gemini request
+The monitoring layer includes visibility into:
 
-&#x20;    │
+### Gateway Performance
 
-&#x20;    ✕ Failure
+- Request rate
+- Successful requests
+- Request latency
+- P95 gateway latency
 
-&#x20;    │
+### Provider Performance
 
-&#x20;    ▼
+- Provider requests
+- Provider failures
+- Provider health
+- Provider latency
+- P95 provider latency
 
-&#x20;Failure handling
+### Self-Healing
 
-&#x20;    │
+- Provider failures
+- Provider failovers
+- Retry attempts
+- Successful recovery through fallback providers
 
-&#x20;    ▼
+### Caching
 
-&#x20;Provider failover
+- Exact cache hits
+- Semantic cache activity
+- Cache misses
+- Cache hit rate
 
-&#x20;    │
+### Governance
 
-&#x20;    ▼
+- Rate-limit rejections
+- Budget rejections
 
-&#x20;Cloudflare
+### Infrastructure
 
-&#x20;    │
+- Redis connectivity and health
 
-&#x20;    ✓ Success
+This makes it possible to observe not only whether the gateway is working, but also how it behaves under failure and recovery conditions.
 
-&#x20;    │
+---
 
-&#x20;    ▼
+## Production Hardening
 
-&#x20;HTTP 200
+The project includes several protections intended to separate development testing from production behaviour.
 
+Production mode:
 
+- Disables failure-injection endpoints
+- Rejects startup when failure-injection flags are enabled
+- Keeps provider credentials outside source control
+- Redacts sensitive information from logs
+- Returns sanitized errors to clients
+- Uses Redis-backed state for shared controls
+- Runs through Docker Compose for reproducible deployment
 
-The application can continue receiving a successful response without having to implement provider-specific recovery logic itself.
+The production environment therefore cannot accidentally expose the development failure-injection mechanisms used for resilience testing.
 
+---
 
+## Technology Stack
 
-🧠 Request Lifecycle
+| Category | Technology |
+|---|---|
+| Programming Language | Python |
+| API Framework | FastAPI |
+| LLM Abstraction | LiteLLM |
+| Cache & Shared State | Redis |
+| Containerization | Docker |
+| Orchestration | Docker Compose |
+| Metrics | Prometheus |
+| Visualization | Grafana |
+| Testing | Pytest |
+| Dependency Management | uv |
 
+### LLM Providers
 
+- Google Gemini
+- Cloudflare Workers AI
+- Cohere
 
-Every request passes through a controlled pipeline:
+---
 
+## Running the Project
 
+### Clone the repository
 
-Request
-
-&#x20;  │
-
-&#x20;  ▼
-
-Authentication
-
-&#x20;  │
-
-&#x20;  ▼
-
-Tenant validation
-
-&#x20;  │
-
-&#x20;  ▼
-
-Rate / Budget controls
-
-&#x20;  │
-
-&#x20;  ▼
-
-Model \& provider routing
-
-&#x20;  │
-
-&#x20;  ▼
-
-Exact cache lookup
-
-&#x20;  │
-
-&#x20;  ├── HIT ──────────────► Return cached response
-
-&#x20;  │
-
-&#x20;  ▼
-
-Semantic cache lookup
-
-&#x20;  │
-
-&#x20;  ├── HIT ──────────────► Return cached response
-
-&#x20;  │
-
-&#x20;  ▼
-
-LLM Provider
-
-&#x20;  │
-
-&#x20;  ├── Success ──────────► Cache + Return
-
-&#x20;  │
-
-&#x20;  └── Failure
-
-&#x20;         │
-
-&#x20;         ▼
-
-&#x20;    Retry / Recovery
-
-&#x20;         │
-
-&#x20;         ▼
-
-&#x20;    Healthy Provider
-
-&#x20;         │
-
-&#x20;         ▼
-
-&#x20;       Success
-
-⚡ What It Handles
-
-🧭 Intelligent Routing
-
-
-
-Routes requests through the configured LLM providers and supports model-tier based request handling.
-
-
-
-💾 Multi-Level Caching
-
-
-
-Uses Redis for:
-
-
-
-Exact response caching
-
-Semantic caching
-
-Reduced repeated provider calls
-
-🚦 Rate Limiting
-
-
-
-Protects the gateway from excessive request volume using Redis-backed rate control.
-
-
-
-💰 Tenant Budgets
-
-
-
-Tracks tenant usage and rejects requests when configured budgets are exceeded.
-
-
-
-🔌 Circuit Breakers
-
-
-
-Prevents repeatedly sending requests to unhealthy providers.
-
-
-
-🔄 Failure-Only Failover
-
-
-
-A healthy provider is not unnecessarily replaced.
-
-
-
-Failover occurs when the current provider actually encounters a failure.
-
-
-
-🔁 Retry \& Recovery
-
-
-
-Transient provider failures can trigger recovery behaviour before moving to another provider.
-
-
-
-🔐 Secure Authentication
-
-
-
-Uses tenant-aware Bearer authentication with constant-time key comparison.
-
-
-
-🕵️ PII Redaction
-
-
-
-Sensitive information is removed from application logs before operational data is recorded.
-
-
-
-📊 Observability
-
-
-
-A self-healing system is only useful if you can see that it healed.
-
-
-
-The gateway exposes Prometheus metrics which are visualized through Grafana.
-
-
-
-The dashboard tracks areas such as:
-
-
-
-Requests
-
-&#x20;  │
-
-&#x20;  ├── Request rate
-
-&#x20;  ├── Successful requests
-
-&#x20;  └── Latency
-
-
-
-Providers
-
-&#x20;  │
-
-&#x20;  ├── Provider requests
-
-&#x20;  ├── Provider failures
-
-&#x20;  ├── Provider latency
-
-&#x20;  └── Provider health
-
-
-
-Self-Healing
-
-&#x20;  │
-
-&#x20;  ├── Provider failures
-
-&#x20;  ├── Failovers
-
-&#x20;  ├── Recovery success
-
-&#x20;  └── Retry attempts
-
-
-
-Governance
-
-&#x20;  │
-
-&#x20;  ├── Rate-limit rejections
-
-&#x20;  └── Budget rejections
-
-
-
-Caching
-
-&#x20;  │
-
-&#x20;  ├── Cache hits
-
-&#x20;  └── Cache misses
-
-
-
-Infrastructure
-
-&#x20;  │
-
-&#x20;  └── Redis health
-
-🔥 Real Failure-Recovery Validation
-
-
-
-A controlled development failure was used to verify the recovery path:
-
-
-
-Gemini
-
-&#x20;  │
-
-&#x20;  ✕ Failure
-
-&#x20;  │
-
-&#x20;  ▼
-
-Provider Failover
-
-&#x20;  │
-
-&#x20;  ▼
-
-Cloudflare
-
-&#x20;  │
-
-&#x20;  ✓ Success
-
-&#x20;  │
-
-&#x20;  ▼
-
-Gateway HTTP 200
-
-
-
-The same event became visible in Grafana through:
-
-
-
-Gemini failures
-
-Provider failures
-
-Provider failovers
-
-Cloudflare fallback success
-
-Successful gateway requests
-
-Gateway latency
-
-Provider latency
-
-
-
-This demonstrates that the system is not only capable of failing over — the recovery behaviour is observable.
-
-
-
-Failure injection is restricted to development environments and is blocked in production.
-
-
-
-🐳 Run the Gateway
-
-1\. Clone
-
+```bash
 git clone https://github.com/Deepthi-0411/self-healing-llm-gateway.git
-
 cd self-healing-llm-gateway
-
-2\. Configure environment variables
-
-
+Configure environment variables
 
 Create a .env file containing the required provider credentials and gateway configuration.
 
+Do not commit .env or expose API keys.
 
-
-Never commit .env or expose provider/API keys.
-
-
-
-3\. Start the infrastructure
-
+Start the infrastructure
 docker compose up --build -d
 
-
-
-The stack includes:
-
-
-
-Gateway
-
-&#x20;  │
-
-&#x20;  ├── FastAPI
-
-&#x20;  ├── LiteLLM
-
-&#x20;  └── Application logic
-
-&#x20;       │
-
-&#x20;       ├── Redis
-
-&#x20;       ├── Prometheus
-
-&#x20;       └── Grafana
-
-
+The Docker Compose stack runs the gateway together with Redis, Prometheus, and Grafana.
 
 Default local endpoints:
 
+Gateway: http://localhost:8000
+Prometheus: http://localhost:9090
+Grafana: http://localhost:3000
+Testing
 
-
-Gateway      http://localhost:8000
-
-Prometheus   http://localhost:9090
-
-Grafana      http://localhost:3000
-
-🧪 Validation
-
-
-
-The project includes automated tests covering core gateway behaviour.
-
-
-
-Run:
-
-
+Run the automated test suite with:
 
 uv run python -m pytest -v
 
+Current automated test result:
 
+8 tests passed
 
-Current validation:
-
-
-
-8 passed
-
-
-
-The gateway was also validated for:
-
-
+The project was also manually validated for:
 
 Authentication
-
 Tenant authorization
-
 Provider routing
-
 Exact caching
-
 Semantic caching
-
 Rate limiting
-
 Budget enforcement
-
 Provider failure handling
-
 Provider failover
-
 Redis connectivity
-
 Production failure-injection protection
-
 Prometheus metrics
-
 Grafana observability
-
-🛠️ Technology Stack
-
-Layer	Technology
-
-API	FastAPI
-
-LLM abstraction	LiteLLM
-
-Runtime	Python
-
-Cache \& state	Redis
-
-Containerization	Docker / Docker Compose
-
-Metrics	Prometheus
-
-Visualization	Grafana
-
-Testing	Pytest
-
-LLM Providers
-
-Google Gemini
-
-Cloudflare Workers AI
-
-Cohere
-
-📁 Project Structure
-
+Project Structure
 self-healing-llm-gateway/
-
-│
-
 ├── app/
-
 │   ├── cache/
-
 │   ├── gateway/
-
 │   └── llm/
-
-│
-
 ├── prometheus/
-
-│
-
 ├── tests/
-
-│
-
 ├── Dockerfile
-
 ├── docker-compose.yml
-
 ├── main.py
-
 ├── pyproject.toml
-
 ├── uv.lock
-
+├── PRODUCTION_VALIDATION.md
 └── README.md
+Engineering Focus
 
-🎯 Engineering Goal
+The project was built with an infrastructure-first approach.
 
+The focus was not simply on connecting an application to an LLM provider, but on building the reliability and operational layer around LLM usage.
 
+The main engineering concerns addressed by the project are:
 
-This project was built with an infrastructure-first mindset.
+Reliability — Continue serving requests when an individual provider fails.
 
+Performance — Reduce unnecessary provider calls through exact and semantic caching.
 
+Governance — Control tenant request volume and usage budgets.
 
-The objective was not simply to create another application that calls an LLM.
+Resilience — Use circuit breakers, retries, provider health, and failure-only failover.
 
+Security — Protect credentials and redact sensitive information from logs.
 
+Observability — Make gateway behaviour, provider health, failures, recovery, and latency measurable.
 
-The objective was to build a layer that can:
+The result is a reusable infrastructure layer that applications can depend on instead of implementing these concerns independently.
 
+Future Improvements
 
-
-Route requests. Protect resources. Reduce unnecessary calls. Detect failures. Recover automatically. And make the entire process observable.
-
-
-
-That turns the LLM gateway into an infrastructure component that applications can depend on.
-
-
-
-🚀 Future Improvements
-
-
-
-Potential extensions include:
-
-
-
-Distributed gateway deployment
-
-Advanced provider health scoring
+Potential areas for further development include:
 
 Adaptive routing based on latency and cost
-
+More advanced provider health scoring
+Distributed gateway deployment
 Distributed tracing
-
-More granular SLO/SLA monitoring
-
+SLO/SLA monitoring
 Automated provider recovery policies
-
-👩‍💻 Author
-
-
+More sophisticated cost-aware routing
+Author
 
 Deepthi M
-
-
 
 AI/ML • Generative AI • LLM Infrastructure • Machine Learning
