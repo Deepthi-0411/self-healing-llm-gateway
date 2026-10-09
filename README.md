@@ -241,7 +241,9 @@ Production mode:
 - Runs through Docker Compose for reproducible deployment
 
 The production environment therefore cannot accidentally expose the development failure-injection mechanisms used for resilience testing.
+## Architecture
 
+![Self-Healing LLM Gateway Architecture](docs/architecture.png)
 ---
 
 ## Technology Stack
